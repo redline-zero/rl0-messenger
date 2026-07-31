@@ -10,7 +10,12 @@ const io = socketIo(server, {
 });
 
 // ============================================================
-//  БАЗА ПОЛЬЗОВАТЕЛЕЙ (встроенная)
+//  РАЗРЕШАЕМ JSON
+// ============================================================
+app.use(express.json());
+
+// ============================================================
+//  БАЗА ПОЛЬЗОВАТЕЛЕЙ
 // ============================================================
 const USERS = {
     'red': {
@@ -63,15 +68,16 @@ const USERS = {
 // ============================================================
 //  ХРАНИЛИЩЕ
 // ============================================================
-const sessions = {};
-const messages = [];
-const onlineUsers = {};
+const sessions = {};        // token → { username, role, branch }
+const onlineUsers = {};     // username → { role, branch, socketId }
+const messages = [];        // все сообщения с id
+let messageId = 0;
 
 // ============================================================
-//  API
+//  API — АВТОРИЗАЦИЯ
 // ============================================================
-app.use(express.json());
 
+// Логин
 app.post('/api/login', (req, res) => {
     const { username, password } = req.body;
     const user = USERS[username];
@@ -84,7 +90,6 @@ app.post('/api/login', (req, res) => {
         return res.status(401).json({ error: 'Неверный пароль' });
     }
 
-    // Генерируем токен сессии
     const token = crypto.randomBytes(32).toString('hex');
     sessions[token] = {
         username: username,
@@ -102,6 +107,7 @@ app.post('/api/login', (req, res) => {
     });
 });
 
+// Проверка токена
 app.post('/api/verify', (req, res) => {
     const { token } = req.body;
     const session = sessions[token];
@@ -111,6 +117,11 @@ app.post('/api/verify', (req, res) => {
     res.json({ valid: true, user: session });
 });
 
+// ============================================================
+//  API — ЧАТ
+// ============================================================
+
+// Статус сервера
 app.get('/api/status', (req, res) => {
     res.json({
         status: 'online',
@@ -119,6 +130,7 @@ app.get('/api/status', (req, res) => {
     });
 });
 
+// Список всех пользователей (с онлайном)
 app.get('/api/users', (req, res) => {
     const list = Object.entries(USERS).map(([username, data]) => ({
         username,
@@ -129,9 +141,20 @@ app.get('/api/users', (req, res) => {
     res.json(list);
 });
 
+// ПОЛУЧЕНИЕ СООБЩЕНИЙ (с автообновлением)
+app.get('/api/messages', (req, res) => {
+    const after = parseInt(req.query.after) || 0;
+    const newMessages = messages.filter(m => m.id > after);
+    res.json({
+        messages: newMessages,
+        lastId: messages.length > 0 ? messages[messages.length - 1].id : 0
+    });
+});
+
 // ============================================================
-//  SOCKET.IO
+//  SOCKET.IO (с авторизацией)
 // ============================================================
+
 io.use((socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token || !sessions[token]) {
@@ -145,10 +168,11 @@ io.on('connection', (socket) => {
     const { username, role, branch } = socket.session;
     console.log(`🔌 ${username} (${role} | ${branch}) подключился`);
 
+    // Сохраняем в онлайн
     onlineUsers[username] = {
         role,
         branch,
-        id: socket.id
+        socketId: socket.id
     };
 
     // Отправляем новому пользователю его данные
@@ -167,9 +191,10 @@ io.on('connection', (socket) => {
         users: Object.keys(onlineUsers)
     });
 
-    // Сообщение
+    // ====== ОБРАБОТКА СООБЩЕНИЙ ======
     socket.on('message', (data) => {
         const msg = {
+            id: ++messageId,
             username: username,
             role: role,
             branch: branch,
@@ -178,10 +203,12 @@ io.on('connection', (socket) => {
         };
         messages.push(msg);
         if (messages.length > 100) messages.shift();
+
+        // Отправляем всем
         io.emit('new_message', msg);
     });
 
-    // Отключение
+    // ====== ОТКЛЮЧЕНИЕ ======
     socket.on('disconnect', () => {
         delete onlineUsers[username];
         io.emit('user_left', { username });
@@ -190,7 +217,7 @@ io.on('connection', (socket) => {
 });
 
 // ============================================================
-//  ЗАПУСК
+//  ЗАПУСК СЕРВЕРА
 // ============================================================
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, '0.0.0.0', () => {
