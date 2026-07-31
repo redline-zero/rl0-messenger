@@ -1,226 +1,119 @@
 const express = require('express');
-const http = require('http');
-const socketIo = require('socket.io');
-const crypto = require('crypto');
-
+const WebSocket = require('ws');
+const fs = require('fs');
 const app = express();
-const server = http.createServer(app);
-const io = socketIo(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
+const port = process.env.PORT || 3000;
+
+// === ЗАГРУЗКА ПОЛЬЗОВАТЕЛЕЙ ===
+const users = JSON.parse(fs.readFileSync('users.json', 'utf8'));
+
+// === ИСТОРИЯ ===
+const HISTORY_FILE = 'history.json';
+let messageHistory = [];
+if (fs.existsSync(HISTORY_FILE)) {
+  try {
+    messageHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+    console.log(`[RL0] Загружено ${messageHistory.length} сообщений`);
+  } catch (e) {}
+}
+
+// === СЕРВЕР ===
+const server = app.listen(port, () => {
+  console.log(`[RL0] Сервер запущен на порту ${port}`);
 });
 
-// ============================================================
-//  РАЗРЕШАЕМ JSON
-// ============================================================
-app.use(express.json());
+const wss = new WebSocket.Server({ server });
+const clients = new Map();
 
-// ============================================================
-//  БАЗА ПОЛЬЗОВАТЕЛЕЙ
-// ============================================================
-const USERS = {
-    'red': {
-        password: 'a7k2p-8r9t4-w3x6z',
-        role: 'Совет',
-        branch: 'R-1'
-    },
-    'shadow': {
-        password: 'm9n5q-2v6b8-y4c3e',
-        role: 'Совет',
-        branch: 'R-2'
-    },
-    'zero': {
-        password: 'r1t7h-5p9k2-s4w8j',
-        role: 'Совет',
-        branch: 'R-3'
-    },
-    'ddos': {
-        password: 'd4a2s-5f3g7-h8j9k',
-        role: 'Ветвь DA',
-        branch: 'DA'
-    },
-    'osint': {
-        password: 'o1s2i-3n4t5-r6g7h',
-        role: 'Ветвь OR',
-        branch: 'OR'
-    },
-    'crypto': {
-        password: 'c8r7y-2p5t9-k3m1n',
-        role: 'Ветвь CR',
-        branch: 'CR'
-    },
-    'dev': {
-        password: 'd5e6v-8r2t4-x7c9q',
-        role: 'Ветвь CT/AB',
-        branch: 'CT/AB'
-    },
-    'social': {
-        password: 's0c1a-4l6p7-z8x2v',
-        role: 'Ветвь PR',
-        branch: 'PR'
-    },
-    'analyst': {
-        password: 'a9n8l-6y5t3-r2e1w',
-        role: 'Ветвь SC',
-        branch: 'SC'
-    }
-};
+// === ЗАЩИТА ===
+const MAX_MESSAGE_SIZE = 1024;
+const MESSAGE_LIMIT_PER_MINUTE = 10;
+const MAX_CLIENTS = 20;
+const userMessageHistory = new Map();
 
-// ============================================================
-//  ХРАНИЛИЩЕ
-// ============================================================
-const sessions = {};        // token → { username, role, branch }
-const onlineUsers = {};     // username → { role, branch, socketId }
-const messages = [];        // все сообщения с id
-let messageId = 0;
+function saveHistory() {
+  try {
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify(messageHistory, null, 2));
+  } catch (e) {}
+}
 
-// ============================================================
-//  API — АВТОРИЗАЦИЯ
-// ============================================================
+wss.on('connection', (ws) => {
+  if (clients.size >= MAX_CLIENTS) {
+    ws.close(1008, 'Сервер переполнен');
+    return;
+  }
 
-// Логин
-app.post('/api/login', (req, res) => {
-    const { username, password } = req.body;
-    const user = USERS[username];
+  let nick = null;
 
-    if (!user) {
-        return res.status(401).json({ error: 'Позывной не найден' });
-    }
+  ws.on('message', (message) => {
+    try {
+      if (message.length > MAX_MESSAGE_SIZE) {
+        ws.send(JSON.stringify({ type: 'error', text: 'Сообщение слишком большое' }));
+        return;
+      }
 
-    if (user.password !== password) {
-        return res.status(401).json({ error: 'Неверный пароль' });
-    }
+      const data = JSON.parse(message);
 
-    const token = crypto.randomBytes(32).toString('hex');
-    sessions[token] = {
-        username: username,
-        role: user.role,
-        branch: user.branch
-    };
+      if (data.type === 'auth') {
+        const user = users[data.nick];
+        if (user && user.pass === data.pass && !clients.has(data.nick)) {
+          nick = data.nick;
+          clients.set(nick, ws);
+          userMessageHistory.set(nick, []);
+          ws.send(JSON.stringify({ type: 'auth', status: 'ok', role: user.role }));
 
-    res.json({
-        token: token,
-        user: {
-            username: username,
-            role: user.role,
-            branch: user.branch
+          const lastMessages = messageHistory.slice(-50);
+          for (const msg of lastMessages) {
+            ws.send(JSON.stringify({ type: 'message', nick: msg.nick, text: msg.text }));
+          }
+
+          broadcast({ type: 'message', nick: 'system', text: `${nick} (${user.role}) зашёл в чат` });
+        } else {
+          ws.send(JSON.stringify({ type: 'auth', status: 'fail' }));
         }
-    });
-});
+      }
 
-// Проверка токена
-app.post('/api/verify', (req, res) => {
-    const { token } = req.body;
-    const session = sessions[token];
-    if (!session) {
-        return res.status(401).json({ error: 'Неавторизован' });
+      else if (data.type === 'message' && nick) {
+        const now = Date.now();
+        const history = userMessageHistory.get(nick) || [];
+        const filtered = history.filter(t => now - t < 60000);
+
+        if (filtered.length >= MESSAGE_LIMIT_PER_MINUTE) {
+          ws.send(JSON.stringify({ type: 'error', text: 'Слишком много сообщений' }));
+          return;
+        }
+
+        filtered.push(now);
+        userMessageHistory.set(nick, filtered);
+
+        const entry = { nick, text: data.text, time: new Date().toISOString() };
+        messageHistory.push(entry);
+        if (messageHistory.length > 1000) messageHistory = messageHistory.slice(-1000);
+        saveHistory();
+
+        broadcast({ type: 'message', nick, text: data.text });
+      }
+
+      else if (data.type === 'ping' && nick) {
+        ws.send(JSON.stringify({ type: 'pong' }));
+      }
+
+    } catch (e) {}
+  });
+
+  ws.on('close', () => {
+    if (nick) {
+      clients.delete(nick);
+      userMessageHistory.delete(nick);
+      broadcast({ type: 'message', nick: 'system', text: nick + ' покинул чат' });
     }
-    res.json({ valid: true, user: session });
+  });
 });
 
-// ============================================================
-//  API — ЧАТ
-// ============================================================
-
-// Статус сервера
-app.get('/api/status', (req, res) => {
-    res.json({
-        status: 'online',
-        users: Object.keys(onlineUsers).length,
-        messages: messages.length
-    });
-});
-
-// Список всех пользователей (с онлайном)
-app.get('/api/users', (req, res) => {
-    const list = Object.entries(USERS).map(([username, data]) => ({
-        username,
-        role: data.role,
-        branch: data.branch,
-        online: !!onlineUsers[username]
-    }));
-    res.json(list);
-});
-
-// ПОЛУЧЕНИЕ СООБЩЕНИЙ (с автообновлением)
-app.get('/api/messages', (req, res) => {
-    const after = parseInt(req.query.after) || 0;
-    const newMessages = messages.filter(m => m.id > after);
-    res.json({
-        messages: newMessages,
-        lastId: messages.length > 0 ? messages[messages.length - 1].id : 0
-    });
-});
-
-// ============================================================
-//  SOCKET.IO (с авторизацией)
-// ============================================================
-
-io.use((socket, next) => {
-    const token = socket.handshake.auth.token;
-    if (!token || !sessions[token]) {
-        return next(new Error('Неавторизован'));
+function broadcast(msg) {
+  for (let [, client] of clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify(msg));
     }
-    socket.session = sessions[token];
-    next();
-});
-
-io.on('connection', (socket) => {
-    const { username, role, branch } = socket.session;
-    console.log(`🔌 ${username} (${role} | ${branch}) подключился`);
-
-    // Сохраняем в онлайн
-    onlineUsers[username] = {
-        role,
-        branch,
-        socketId: socket.id
-    };
-
-    // Отправляем новому пользователю его данные
-    socket.emit('auth_success', {
-        username,
-        role,
-        branch,
-        users: Object.keys(onlineUsers)
-    });
-
-    // Всем — что новый пользователь в сети
-    io.emit('user_joined', {
-        username,
-        role,
-        branch,
-        users: Object.keys(onlineUsers)
-    });
-
-    // ====== ОБРАБОТКА СООБЩЕНИЙ ======
-    socket.on('message', (data) => {
-        const msg = {
-            id: ++messageId,
-            username: username,
-            role: role,
-            branch: branch,
-            text: data.message,
-            time: new Date().toLocaleTimeString()
-        };
-        messages.push(msg);
-        if (messages.length > 100) messages.shift();
-
-        // Отправляем всем
-        io.emit('new_message', msg);
-    });
-
-    // ====== ОТКЛЮЧЕНИЕ ======
-    socket.on('disconnect', () => {
-        delete onlineUsers[username];
-        io.emit('user_left', { username });
-        console.log(`⛔ ${username} отключился`);
-    });
-});
-
-// ============================================================
-//  ЗАПУСК СЕРВЕРА
-// ============================================================
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🔴 RedLine Zero сервер запущен на порту ${PORT}`);
-    console.log(`👥 Зарегистрировано пользователей: ${Object.keys(USERS).length}`);
-});
+  }
+}
