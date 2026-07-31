@@ -1,163 +1,62 @@
-const express = require('express');
-const http = require('http');
-const socketIo = require('socket.io');
-const session = require('express-session');
-const sqlite3 = require('sqlite3');
-const bcrypt = require('bcrypt');
-const path = require('path');
+#!/usr/bin/env python3
+from flask import Flask, render_template, request, jsonify
+from flask_socketio import SocketIO, emit
+import json
+import os
+from datetime import datetime
 
-const app = express();
-const server = http.createServer(app);
-const io = socketIo(server);
+app = Flask(__name__)
+app.secret_key = "redline_zero_secret_2025"
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-// ==================== НАСТРОЙКА ====================
+# Хранилище сообщений и пользователей
+messages = []
+users = {}
 
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
-app.use(session({
-    secret: 'redline_zero_secret_key_2025',
-    resave: false,
-    saveUninitialized: true,
-    cookie: { secure: false }
-}));
+@app.route("/")
+def index():
+    return render_template("index.html")
 
-// ==================== БАЗА ДАННЫХ ====================
+@app.route("/api/status")
+def status():
+    return jsonify({
+        "status": "online",
+        "time": datetime.now().isoformat(),
+        "users": len(users),
+        "messages": len(messages)
+    })
 
-const db = new sqlite3.Database('./messages.db');
+@socketio.on("connect")
+def handle_connect():
+    print(f"🔌 Клиент подключён: {request.sid}")
 
-db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        password TEXT,
-        created_at TEXT
-    )
-`);
+@socketio.on("disconnect")
+def handle_disconnect():
+    for username, sid in list(users.items()):
+        if sid == request.sid:
+            del users[username]
+            emit("user_left", {"username": username}, broadcast=True)
+            break
 
-db.run(`
-    CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        room TEXT,
-        username TEXT,
-        message TEXT,
-        timestamp TEXT
-    )
-`);
+@socketio.on("join")
+def handle_join(data):
+    username = data.get("username", "Аноним")
+    users[username] = request.sid
+    emit("user_joined", {"username": username, "users": list(users.keys())}, broadcast=True)
 
-db.run(`
-    CREATE TABLE IF NOT EXISTS rooms (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE,
-        created_by TEXT,
-        created_at TEXT
-    )
-`);
-
-// ==================== РОУТЫ ====================
-
-app.get('/', (req, res) => {
-    if (req.session.username) {
-        res.sendFile(path.join(__dirname, 'views', 'chat.html'));
-    } else {
-        res.redirect('/login');
+@socketio.on("message")
+def handle_message(data):
+    username = data.get("username", "Аноним")
+    text = data.get("message", "")
+    msg = {
+        "username": username,
+        "text": text,
+        "time": datetime.now().strftime("%H:%M")
     }
-});
+    messages.append(msg)
+    if len(messages) > 100:
+        messages.pop(0)
+    emit("new_message", msg, broadcast=True)
 
-app.get('/login', (req, res) => {
-    res.sendFile(path.join(__dirname, 'views', 'login.html'));
-});
-
-app.post('/login', (req, res) => {
-    const { username, password } = req.body;
-    db.get('SELECT * FROM users WHERE username = ?', [username], (err, user) => {
-        if (err || !user) {
-            return res.status(403).send('Неверный логин или пароль');
-        }
-        bcrypt.compare(password, user.password, (err, result) => {
-            if (result) {
-                req.session.username = username;
-                res.redirect('/');
-            } else {
-                res.status(403).send('Неверный логин или пароль');
-            }
-        });
-    });
-});
-
-app.get('/register', (req, res) => {
-    res.sendFile(path.join(__dirname, 'views', 'register.html'));
-});
-
-app.post('/register', (req, res) => {
-    const { username, password } = req.body;
-    bcrypt.hash(password, 10, (err, hash) => {
-        if (err) return res.status(500).send('Ошибка');
-        db.run('INSERT INTO users (username, password, created_at) VALUES (?, ?, datetime("now"))', [username, hash], (err) => {
-            if (err) {
-                return res.status(400).send('Пользователь уже существует');
-            }
-            res.redirect('/login');
-        });
-    });
-});
-
-app.get('/logout', (req, res) => {
-    req.session.destroy();
-    res.redirect('/login');
-});
-
-// ==================== SOCKET.IO ====================
-
-io.on('connection', (socket) => {
-    console.log('Новое соединение');
-
-    socket.on('join', (data) => {
-        const room = data.room || 'general';
-        socket.join(room);
-        io.to(room).emit('message', {
-            username: 'Система',
-            message: `${socket.username || 'Аноним'} присоединился к ${room}`,
-            timestamp: new Date().toLocaleTimeString()
-        });
-    });
-
-    socket.on('message', (data) => {
-        const room = data.room || 'general';
-        const username = socket.username || 'Аноним';
-        const message = data.message;
-        
-        db.run('INSERT INTO messages (room, username, message, timestamp) VALUES (?, ?, ?, datetime("now"))', [room, username, message]);
-        
-        io.to(room).emit('message', {
-            username: username,
-            message: message,
-            timestamp: new Date().toLocaleTimeString()
-        });
-    });
-
-    socket.on('create_room', (data) => {
-        const room = data.room;
-        const username = socket.username || 'Аноним';
-        db.run('INSERT INTO rooms (name, created_by, created_at) VALUES (?, ?, datetime("now"))', [room, username], (err) => {
-            if (err) {
-                socket.emit('room_created', { room: room, status: 'error' });
-            } else {
-                socket.emit('room_created', { room: room, status: 'ok' });
-            }
-        });
-    });
-
-    socket.on('set_username', (data) => {
-        socket.username = data.username;
-    });
-
-    socket.on('disconnect', () => {
-        console.log('Пользователь отключился');
-    });
-});
-
-// ==================== ЗАПУСК ====================
-
-server.listen(5000, '0.0.0.0', () => {
-    console.log('🔴 RedLine Messenger запущен на порту 5000');
-});
+if __name__ == "__main__":
+    socketio.run(app, host="0.0.0.0", port=5000, debug=False)
