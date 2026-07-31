@@ -1,62 +1,77 @@
-#!/usr/bin/env python3
-from flask import Flask, render_template, request, jsonify
-from flask_socketio import SocketIO, emit
-import json
-import os
-from datetime import datetime
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const path = require('path');
 
-app = Flask(__name__)
-app.secret_key = "redline_zero_secret_2025"
-socketio = SocketIO(app, cors_allowed_origins="*")
+const app = express();
+const server = http.createServer(app);
+const io = socketIo(server);
 
-# Хранилище сообщений и пользователей
-messages = []
-users = {}
+// Статика
+app.use(express.static(path.join(__dirname, 'public')));
 
-@app.route("/")
-def index():
-    return render_template("index.html")
+// Хранилище
+const users = {};
+const messages = [];
 
-@app.route("/api/status")
-def status():
-    return jsonify({
-        "status": "online",
-        "time": datetime.now().isoformat(),
-        "users": len(users),
-        "messages": len(messages)
-    })
+// Главная страница
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
-@socketio.on("connect")
-def handle_connect():
-    print(f"🔌 Клиент подключён: {request.sid}")
+// API статус
+app.get('/api/status', (req, res) => {
+    res.json({
+        status: 'online',
+        users: Object.keys(users).length,
+        messages: messages.length
+    });
+});
 
-@socketio.on("disconnect")
-def handle_disconnect():
-    for username, sid in list(users.items()):
-        if sid == request.sid:
-            del users[username]
-            emit("user_left", {"username": username}, broadcast=True)
-            break
+// Socket.IO
+io.on('connection', (socket) => {
+    console.log('🔌 Клиент подключён:', socket.id);
 
-@socketio.on("join")
-def handle_join(data):
-    username = data.get("username", "Аноним")
-    users[username] = request.sid
-    emit("user_joined", {"username": username, "users": list(users.keys())}, broadcast=True)
+    socket.on('join', (data) => {
+        const username = data.username || 'Аноним';
+        users[username] = socket.id;
+        io.emit('user_joined', {
+            username: username,
+            users: Object.keys(users)
+        });
+    });
 
-@socketio.on("message")
-def handle_message(data):
-    username = data.get("username", "Аноним")
-    text = data.get("message", "")
-    msg = {
-        "username": username,
-        "text": text,
-        "time": datetime.now().strftime("%H:%M")
-    }
-    messages.append(msg)
-    if len(messages) > 100:
-        messages.pop(0)
-    emit("new_message", msg, broadcast=True)
+    socket.on('message', (data) => {
+        const username = data.username || 'Аноним';
+        const text = data.message || '';
+        const msg = {
+            username: username,
+            text: text,
+            time: new Date().toLocaleTimeString()
+        };
+        messages.push(msg);
+        if (messages.length > 100) messages.shift();
+        io.emit('new_message', msg);
+    });
 
-if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000, debug=False)
+    socket.on('disconnect', () => {
+        let leftUser = null;
+        for (const [name, id] of Object.entries(users)) {
+            if (id === socket.id) {
+                leftUser = name;
+                delete users[name];
+                break;
+            }
+        }
+        if (leftUser) {
+            io.emit('user_left', { username: leftUser });
+        }
+        console.log('⛔ Клиент отключён:', socket.id);
+    });
+});
+
+// Запуск
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🔴 RedLine Node.js запущен на порту ${PORT}`);
+});
