@@ -1,0 +1,38 @@
+{
+  "red": {
+    "role": "Совет (R-1)",
+    "pass": "a7k2p-8r9t4-w3x6z"
+  },
+  "shadow": {
+    "role": "Совет (R-2)",
+    "pass": "m9n5q-2v6b8-y4c3e"
+  },
+  "zero": {
+    "role": "Совет (R-3)",
+    "pass": "r1t7h-5p9k2-s4w8j"
+  },
+  "ddos": {
+    "role": "Ветвь DA",
+    "pass": "d4a2s-5f3g7-h8j9k"
+  },
+  "osint": {
+    "role": "Ветвь OR",
+    "pass": "o1s2i-3n4t5-r6g7h"
+  },
+  "crypto": {
+    "role": "Ветвь CR",
+    "pass": "c8r7y-2p5t9-k3m1n"
+  },
+  "dev": {
+    "role": "Ветвь CT/AB",
+    "pass": "d5e6v-8r2t4-x7c9q"
+  },
+  "social": {
+    "role": "Ветвь PR",
+    "pass": "s0c1a-4l6p7-z8x2v"
+  },
+  "analyst": {
+    "role": "Ветвь SC",
+    "pass": "a9n8l-6y5t3-r2e1w"
+  }
+}
